@@ -1,0 +1,48 @@
+# Środowisko obliczeniowe pracy magisterskiej.
+#
+# WERSJA ZAMROŻONA. Plik opisuje dokładnie to środowisko, które policzyło
+# wyniki przedstawione w pracy. Nie aktualizować w trakcie pisania:
+#
+#   - nrel-pysam 7.1.1.post1 wiąże silnik SSC w wersji 306;
+#   - najnowsze wydanie, 8.0.0 (SAM 2026.7.3, SSC 308), ukazało się pod
+#     ZMIENIONĄ NAZWĄ PAKIETU: nlr-pysam. Według listy zmian zmienia ono
+#     przede wszystkim wartości domyślne konfiguracji, w tym parametry
+#     cec_* w konfiguracjach Pvsamv1. Wartości domyślnych potok nie używa
+#     (wszystkie parametry modułu ustawiane są jawnie), ale aktualizacja
+#     w trakcie pracy i tak niszczy odtwarzalność: wyniki policzone przed
+#     i po przestałyby być porównywalne.
+#
+# Odtworzenie środowiska (Windows; uv pobiera własną dystrybucję CPythona,
+# bez instalacji systemowej):
+#
+#     py -3.14 -m uv venv .venv --python 3.13
+#     py -3.14 -m uv sync --frozen
+#
+# Wersje do tabeli narzędzi w rozdz. 6.1 (wymóg E4 z CLAUDE.md):
+# PySAM 7.1.1.post1, SSC 306, Python 3.13.16, pvlib 0.16.1,
+# pandas 3.0.6, numpy 2.5.3, matplotlib 3.11.2.
+
+[project]
+name = "vapv-praca-magisterska"
+version = "0.1.0"
+description = "Potok obliczeniowy pracy magisterskiej: VAPV off-grid dla pojazdu turystycznego"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # Model fizyczny generatora PV — moduł Pvsamv1 silnika SSC.
+    # Przypięcie dokładnej wersji jest celowe (patrz komentarz na górze).
+    "nrel-pysam==7.1.1.post1",
+    # Bilans magazynu, agregacja szeregów, zestawienia wyników.
+    "pandas==3.0.6",
+    "numpy==2.5.3",
+    # Pobieranie danych z API bazy PVGIS.
+    "requests==2.34.2",
+    # Kontrola jakości danych meteorologicznych i kontrola krzyżowa
+    # dopasowania parametrów modułu (rozdz. 4.7).
+    "pvlib==0.16.1",
+    # Rysunki danych do pracy (simulation/plots/).
+    "matplotlib==3.11.2",
+]
+
+[tool.uv]
+# Projekt nie jest pakietem instalowalnym — to katalog skryptów.
+package = false

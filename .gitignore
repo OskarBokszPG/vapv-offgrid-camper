@@ -1,0 +1,15 @@
+# Środowisko i pliki tymczasowe
+.venv/
+__pycache__/
+*.pyc
+
+# Wyniki obliczeń: odtwarzalne z potoku, nie wchodzą do repozytorium
+out/
+simulation/out/
+simulation/weather/
+
+# Dane wejściowe i dokumenty: pobierane według MANIFEST.md
+data/
+dane_pvgis/
+*.pdf
+*.csv
