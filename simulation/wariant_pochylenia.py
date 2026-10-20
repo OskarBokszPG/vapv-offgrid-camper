@@ -3,9 +3,11 @@
 Nazwa pliku / Moduł: wariant_pochylenia.py
 Opis: wariant z modułem podnoszonym na postoju. Moduł leży na platformie
       przez cały czas jazdy, a na postoju jest podnoszony jedną
-      krawędzią do kąta beta. Rozpatrywane są dwa przypadki orientacji:
-      ustawienie południowe oraz orientacja przypadkowa, dla której
-      wynik uśredniono po ośmiu azymutach co 45 stopni.
+      krawędzią do kąta beta. Rozpatrywane są dwa przypadki orientacji
+      południowej. Orientacji przypadkowej nie zestawiono: bilans
+      uśrednionej generacji nie jest równoważny średniej bilansów, a
+      uśrednienie stałych azymutów nie opisuje zmiany ustawienia pojazdu
+      (komentarz K100).
 
 Autor: Oskar Boksz
 Uczelnia: Politechnika Gdańska
@@ -25,7 +27,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -51,7 +53,16 @@ AZYMUT_POLUDNIE = 180.0
 AZYMUTY_PRZYPADKOWE = tuple(float(a) for a in range(0, 360, 45))
 ALBEDO = 0.2
 
-MAGAZYN_AH = grid_analiza.OAT_MAGAZYN_AH
+# Pojemnosc projektowa, czyli ta sama, dla ktorej oceniane sa wymagania.
+# grid_analiza.OAT_MAGAZYN_AH ma wartosc domyslna, ustawiana dopiero
+# w przebiegu analizy, wiec czytana jest z oceny wymagan.
+def _pojemnosc_projektowa_ah() -> int:
+    import pandas as _pd
+    wym = _pd.read_csv(config.OUT_DIR / "requirements_check.csv")
+    return grid_analiza.pojemnosc_projektowa_ah(wym)
+
+
+MAGAZYN_AH = _pojemnosc_projektowa_ah()
 LADOWARKA = grid_analiza.OAT_LADOWARKA
 SCENARIUSZ = grid_analiza.OAT_SCENARIUSZ      # A-DC
 SCENARIUSZ_W1 = "A-AC"                        # scenariusz oceny wymagania W1
@@ -94,13 +105,12 @@ def _bilans(loc, rok, moc_kw: np.ndarray, scenariusz: str,
     dodatek_w = loads_pobor_jazdy()
     obc_dc = profil["DC"].to_numpy(float) / 1000.0 + udzial * dodatek_w / 1000.0
     obc_ac = profil["AC"].to_numpy(float) / 1000.0
-    jalowy = profil["pobór falownika z szyny DC"].to_numpy(float) / 1000.0
-    jalowy = np.maximum(jalowy - obc_ac, 0.0)
+    straty = profil["straty toru"].to_numpy(float) / 1000.0
     return bb.bilans_godzinowy(
         moc_kw, par, indeks=indeks,
         obciazenie_dc_kwh=obc_dc,
         obciazenie_ac_kwh=obc_ac if obc_ac.sum() > 0 else None,
-        falownik_jalowy_kwh=jalowy if obc_ac.sum() > 0 else None,
+        straty_toru_kwh=straty,
         doplyw_alternatora_kwh=alternator,
         temperatura_ogniw_C=t_ogniw,
         rozbieg_godzin=run_grid.ROZBIEG_GODZIN)
@@ -193,21 +203,6 @@ def main() -> int:
                 tab.insert(0, "lokalizacja", loc.label)
                 miesiace.append(tab)
 
-            # --- orientacja przypadkowa: rok odniesienia, osiem azymutów --
-            losowe = [przebieg_wariantu(loc, rok_odniesienia, beta, azymut,
-                                        plaskie[rok_odniesienia], MAGAZYN_AH,
-                                        SCENARIUSZ)
-                      for azymut in AZYMUTY_PRZYPADKOWE]
-            wiersze.append({
-                "lokalizacja": loc.label, "wariant": "przypadkowa",
-                "pochylenie_deg": beta,
-                "azymut": "średnia z 8",
-                "E_DC_kWh": float(np.mean([w["E_DC_kWh"] for w in losowe])),
-                "E_pokryte_kWh": float(np.mean([w["E_pokryte_kWh"]
-                                                for w in losowe])),
-                "LPSP_rok_najgorszy": float(np.mean([w["LPSP"]
-                                                     for w in losowe])),
-            })
         print("  %s: gotowe" % loc.label, flush=True)
 
     tab = pd.DataFrame(wiersze)

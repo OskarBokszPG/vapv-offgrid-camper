@@ -26,7 +26,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -58,9 +58,17 @@ def main() -> int:
     wiersze = []
     for loc in LOCATIONS.values():
         for rok in lata:
-            moc_kw, _ = run_grid.generacja(loc, rok, run_pv.MODUL_KATALOG)
+            run_grid.generacja(loc, rok, run_pv.MODUL_KATALOG)
+            # Szczyt przed ograniczeniem regulatora: szereg zwracany przez
+            # generacje jest juz obciety progiem, wiec nie opisuje mocy
+            # dostepnej po stronie generatora.
+            klucz = (loc.key, rok, run_pv.MODUL_KATALOG["nazwa"],
+                     round(run_grid.MNOZNIK_PROMIENIOWANIA, 4))
             wiersze.append({"lokalizacja": loc.label, "rok": rok,
-                            "P_dc_max_kW": round(float(np.max(moc_kw)), 4)})
+                            "P_dc_max_kW": round(
+                                run_grid._SZCZYT_DC[klucz], 4),
+                            "E_obciete_kWh": round(
+                                run_grid._OBCIECIE_MPPT[klucz], 3)})
         print("  %s: gotowe" % loc.label, flush=True)
 
     tab = pd.DataFrame(wiersze)
@@ -78,7 +86,14 @@ def main() -> int:
         ("MpptSprawnosc", fmt.pl_tex(par.sprawnosc_mppt, 2)),
         ("MpptMocDcMax", fmt.pl_tex(1000.0 * dc_max_kw, 0)),
         ("MpptMocWyjsciowaMax", fmt.pl_tex(1000.0 * wy_max_kw, 0)),
-        ("MpptZapasMocy", fmt.pl_tex(zapas_pct, 1)),
+        ("MpptZapasMocy", fmt.pl_tex(abs(zapas_pct), 1)),
+        ("MpptEnergiaObcieta", fmt.pl_tex(
+            float(tab["E_obciete_kWh"].max()), 2)),
+        ("MpptGodzinObciecia", fmt.pl_tex(
+            float((tab["E_obciete_kWh"] > 0.0).sum()), 0)),
+        ("MpptLatObciecia", fmt.pl_tex(
+            float((tab.groupby("rok")["E_obciete_kWh"].max() > 0.0).sum()),
+            0)),
     )
     tresc = ["%% WYGENEROWANO AUTOMATYCZNIE: simulation/kontrola_mppt.py"
              " --- nie edytować ręcznie",
@@ -93,6 +108,8 @@ def main() -> int:
     print("po regulatorze= %.4f kW" % wy_max_kw)
     print("limit 30 A    = %.4f kW" % limit_kw)
     print("zapas         = %.1f %%" % zapas_pct)
+    print("obcieta max   = %.3f kWh/rok w jednej lokalizacji"
+          % tab["E_obciete_kWh"].max())
     return 0
 
 

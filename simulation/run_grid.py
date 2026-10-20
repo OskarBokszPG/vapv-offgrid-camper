@@ -22,7 +22,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -67,11 +67,13 @@ AGM_SPRAWNOSC_OBIEGU = 0.80     # przyjęta; AGM ma niższą sprawność niż LF
 # SmartSolar MPPT 100/30: prąd ładowania 30 A, nominalna moc PV przy
 # magistrali 12 V równa 440 W (instrukcja s. 65). Moduł 470 Wp przekracza tę
 # moc o 7 %, więc regulator obcina moc wyjściową przy najwyższym natężeniu
-# promieniowania. Ograniczenie zadane jest prądem wyjściowym przy napięciu
-# podtrzymania 13,8 V z karty, a energia obcięta raportowana osobno.
+# promieniowania. Ograniczenie zadane jest prądem wyjściowym, a próg mocy
+# zależy od napięcia magazynu: przyjęto napięcie znamionowe 12,8 V, czyli
+# wartość mniejszą od napięcia podtrzymania 13,8 V, bo daje próg niższy
+# i tym samym ocenę zachowawczą. Energia obcięta raportowana jest osobno.
 MPPT_PRAD_WYJSCIOWY_A = 30.0
 MPPT_NAPIECIE_PODTRZYMANIA_V = 13.8
-MPPT_MOC_WYJSCIOWA_W = MPPT_PRAD_WYJSCIOWY_A * MPPT_NAPIECIE_PODTRZYMANIA_V
+MPPT_MOC_WYJSCIOWA_W = MPPT_PRAD_WYJSCIOWY_A * U_MAGAZYNU_V
 
 # --- ładowarki stałoprądowe ------------------------------------------------
 # Moc ładowania przyjęta jako iloczyn prądu wyjściowego i napięcia magazynu.
@@ -85,11 +87,37 @@ LADOWARKI = {
     "Orion XS 50": 50.0,
 }
 LADOWARKA_OGRANICZONA = ("Orion XS 50 (30 A na wejściu)", 30.0)
+# Napięcia po obu stronach ładowarki i jej sprawność maksymalna. Nastawa
+# prądu obowiązuje jednocześnie dla wejścia i wyjścia, więc moc wyjściową
+# ogranicza mniejszy z dwóch iloczynów (wzór 5.2).
+LADOWARKA_U_WE_V = 13.2
+LADOWARKA_U_WY_V = 13.8
+LADOWARKA_SPRAWNOSC = 0.985
 # Prąd alternatora ogranicza dopływ wyłącznie wtedy, gdy ładowarka mogłaby
 # pobrać więcej, niż alternator oddaje po pokryciu odbiorów pokładowych.
 # Przyjęto, że na ładowanie magazynu bytowego dostępne jest 25 % prądu
 # znamionowego alternatora (wartość PRZYJĘTA — reszta zasila odbiory pojazdu).
 UDZIAL_ALTERNATORA = 0.25
+
+
+def moc_ladowarki_w(prad_nastawy_A: float,
+                    prad_alternatora_A: float) -> float:
+    """Moc wyjściowa ładowarki stałoprądowej, W.
+
+        P_wy = min(eta * U_we * I_we,max;  U_wy * I_wy,max)
+
+    Nastawa prądu obowiązuje po obu stronach, więc oba iloczyny liczone są
+    z tej samej wartości. Trzecim ograniczeniem jest moc dostępna
+    z alternatora po pokryciu odbiorów pokładowych pojazdu, przeliczona na
+    stronę wyjściową tą samą sprawnością. Sprawność 0,985 jest wartością
+    maksymalną z karty, nie gwarantowaną w każdym punkcie pracy, więc
+    oszacowanie mocy jest górne.
+    """
+    p_od_wejscia = LADOWARKA_SPRAWNOSC * LADOWARKA_U_WE_V * prad_nastawy_A
+    p_od_wyjscia = LADOWARKA_U_WY_V * prad_nastawy_A
+    p_od_alternatora = (LADOWARKA_SPRAWNOSC * LADOWARKA_U_WE_V
+                        * prad_alternatora_A * UDZIAL_ALTERNATORA)
+    return min(p_od_wejscia, p_od_wyjscia, p_od_alternatora)
 
 # --- profile jazdy (rozdz. 4.3) -------------------------------------------
 # Godziny jazdy w czasie lokalnym, zadane jako funkcja indeksu dobowego.
@@ -129,8 +157,14 @@ _PAMIEC_PV: dict[tuple, tuple[np.ndarray, pd.DatetimeIndex]] = {}
 # składowe promieniowania w pliku zasobu i służy wyłącznie analizie
 # wrażliwości na niepewność danych wejściowych (rozdz. 6).
 MNOZNIK_PROMIENIOWANIA = 1.0
+# Wymuszony plik zasobu slonecznego. Wartosc rozna od None zastepuje
+# plik wybierany po lokalizacji i roku; sluzy przebiegom kontrolnym na
+# jednym pliku danych, bez calego katalogu zasobow.
+ZASOB_WYMUSZONY = None
 # Energia obcięta przez ograniczenie prądu wyjściowego regulatora, kWh/rok.
 _OBCIECIE_MPPT: dict[tuple[str, int, str], float] = {}
+# Moc szczytowa stalopradowa przed ograniczeniem regulatora, kW.
+_SZCZYT_DC: dict[tuple, float] = {}
 
 
 def plik_zasobu_skalowany(plik, mnoznik: float):
@@ -166,7 +200,8 @@ def generacja(loc: Location, rok: int, modul: dict) -> tuple[np.ndarray, pd.Date
     if klucz in _PAMIEC_PV:
         return _PAMIEC_PV[klucz]
 
-    plik = resource.resource_path(loc, rok)
+    plik = (resource.resource_path(loc, rok) if ZASOB_WYMUSZONY is None
+            else ZASOB_WYMUSZONY)
     if abs(MNOZNIK_PROMIENIOWANIA - 1.0) > 1e-9:
         plik = plik_zasobu_skalowany(plik, MNOZNIK_PROMIENIOWANIA)
     oryginal = run_pv.MODUL_KATALOG
@@ -190,6 +225,7 @@ def generacja(loc: Location, rok: int, modul: dict) -> tuple[np.ndarray, pd.Date
     limit_kw = (MPPT_MOC_WYJSCIOWA_W / 1000.0
                 / bb.ParametryUkladu().sprawnosc_mppt)
     obciete_kwh = float(np.maximum(moc_kw - limit_kw, 0.0).sum())
+    _SZCZYT_DC[klucz] = float(np.max(moc_kw))
     moc_kw = np.minimum(moc_kw, limit_kw)
     _OBCIECIE_MPPT[klucz] = round(obciete_kwh, 3)
     blok = pd.read_csv(plik, skiprows=2)
@@ -269,9 +305,9 @@ def doplyw_alternatora(udzial_jazdy: np.ndarray, ladowarka: str,
     znamionowego. ``dostepnosc`` odwzorowuje wariant, w którym alternator
     sterowany nie pracuje przez cały czas jazdy.
     """
-    moc_ladowarki_w = LADOWARKI[ladowarka] * U_MAGAZYNU_V
-    moc_alternatora_w = prad_alternatora_A * UDZIAL_ALTERNATORA * U_MAGAZYNU_V
-    moc_w = min(moc_ladowarki_w, moc_alternatora_w)
+    prad = (LADOWARKA_OGRANICZONA[1] if ladowarka == LADOWARKA_OGRANICZONA[0]
+            else LADOWARKI[ladowarka])
+    moc_w = moc_ladowarki_w(prad, prad_alternatora_A)
     return udzial_jazdy * dostepnosc * moc_w / 1000.0
 
 
@@ -307,8 +343,18 @@ def przebieg(loc: Location, rok: int, modul: dict, parametry: bb.ParametryUkladu
              godzin_jazdy_C: float = 0.0,
              model_chlodziarki: str = loads.MODEL_CHLODZIARKI,
              podbicie_K: float = loads.KABINA_PODBICIE_BAZOWE_K,
+             soc_poczatkowy_wzgl: float | None = None,
+             rozbieg_godzin: int | None = None,
              ) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Wykonuje jeden bilans roczny i zwraca (przebiegi, wskaźniki)."""
+    """Wykonuje jeden bilans roczny i zwraca (przebiegi, wskaźniki).
+
+    ``soc_poczatkowy_wzgl`` pozwala skleić kolejne lata w jeden ciąg: rok
+    rozpoczyna się stanem naładowania, jakim zakończył się rok poprzedni.
+    ``rozbieg_godzin`` obowiązuje wtedy wyłącznie w pierwszym roku szeregu.
+    """
+    if soc_poczatkowy_wzgl is not None:
+        parametry = copy.replace(parametry,
+                                 soc_poczatkowy_wzgl=soc_poczatkowy_wzgl)
     moc_kw, indeks = generacja(loc, rok, modul)
     profil = profil_scenariusza(loc, rok, scenariusz, model_chlodziarki, podbicie_K)
     bb.sprawdz_zgodnosc_indeksu(indeks, profil.index)
@@ -324,17 +370,20 @@ def przebieg(loc: Location, rok: int, modul: dict, parametry: bb.ParametryUkladu
     dodatek_w = loads.pobory_wlasne_w(jazda=True) - loads.pobory_wlasne_w()
     obc_dc = profil["DC"].to_numpy(float) / 1000.0 + udzial * dodatek_w / 1000.0
     obc_ac = profil["AC"].to_numpy(float) / 1000.0
-    jalowy = profil["pobór falownika z szyny DC"].to_numpy(float) / 1000.0
-    jalowy = np.maximum(jalowy - obc_ac, 0.0)
+    # Straty torów zasilania: zasilacz sieciowy i falownik w wariancie AC,
+    # przetwornica w wariancie DC. Energia zadana odbiornikow jest w obu
+    # wariantach ta sama, wiec roznica wariantow sprowadza sie do strat.
+    straty = profil["straty toru"].to_numpy(float) / 1000.0
 
     return bb.bilans_godzinowy(
         moc_kw, parametry, indeks=indeks,
         obciazenie_dc_kwh=obc_dc,
         obciazenie_ac_kwh=obc_ac if obc_ac.sum() > 0 else None,
-        falownik_jalowy_kwh=jalowy if obc_ac.sum() > 0 else None,
+        straty_toru_kwh=straty,
         doplyw_alternatora_kwh=alternator,
         temperatura_ogniw_C=t_ogniw,
-        rozbieg_godzin=ROZBIEG_GODZIN)
+        rozbieg_godzin=(ROZBIEG_GODZIN if rozbieg_godzin is None
+                        else rozbieg_godzin))
 
 
 def czas_jazdy_min(loc: Location, rok: int, modul: dict,
@@ -397,9 +446,16 @@ def siatka(lata: range, bez_oat: bool = False) -> dict[str, pd.DataFrame]:
     start = time.monotonic()
     liczba = 0
 
-    for loc, rok, (nazwa_modulu, modul), (nazwa_mag, par), scen, ladowarka in \
-            itertools.product(LOCATIONS.values(), lata, moduly(), magazyny,
+    # Lata przechodzone sa w kolejnosci wewnatrz konfiguracji, a stan
+    # naladowania przenosi sie z roku na rok: szereg dziesieciolecia jest
+    # jednym ciagiem, wiec okres rozbiegowy obowiazuje wylacznie w pierwszym
+    # roku. Wskazniki pozostaja roczne, bo wymaganie W1a ocenia rok najgorszy.
+    lata_lista = list(lata)
+    for loc, (nazwa_modulu, modul), (nazwa_mag, par), scen, ladowarka in \
+            itertools.product(LOCATIONS.values(), moduly(), magazyny,
                               SCENARIUSZE, LADOWARKI):
+      soc_start = None
+      for rok in lata_lista:
         # Wariant alternatora zmienia wynik tylko tam, gdzie jazda występuje;
         # dla uproszczenia siatki prąd alternatora bierzemy bazowy, a wariant
         # 180 A wchodzi do analizy wrażliwości.
@@ -409,7 +465,11 @@ def siatka(lata: range, bez_oat: bool = False) -> dict[str, pd.DataFrame]:
                                       config.ALTERNATOR_PRAD_A)
         _, w = przebieg(loc, rok, modul, par, scen, ladowarka,
                         config.ALTERNATOR_PRAD_A,
-                        godzin_jazdy_C=0.0 if np.isnan(godzin_C) else godzin_C)
+                        godzin_jazdy_C=0.0 if np.isnan(godzin_C) else godzin_C,
+                        soc_poczatkowy_wzgl=soc_start,
+                        rozbieg_godzin=(ROZBIEG_GODZIN
+                                        if rok == lata_lista[0] else 0))
+        soc_start = w.get("SoC_koncowy_wzgledny")
         liczba += 1
         wiersze.append({
             "lokalizacja": loc.label, "rok": rok, "modul": nazwa_modulu,
@@ -424,9 +484,10 @@ def siatka(lata: range, bez_oat: bool = False) -> dict[str, pd.DataFrame]:
             "E_blokada_pv_kWh": round(w["E_blokada_pv_kWh"], 3),
             "E_blokada_alternator_kWh": round(w["E_blokada_alternator_kWh"], 3),
             "godziny_deficytu": w["godziny_deficytu"],
+            "najdluzsza_przerwa_h": w["najdluzsza_przerwa_h"],
             "godziny_blokady": w.get("godziny_blokady", 0),
             "E_obciete_mppt_kWh": _OBCIECIE_MPPT.get(
-                (loc.key, rok, nazwa_modulu,
+                (loc.key, rok, modul["nazwa"],
                  round(MNOZNIK_PROMIENIOWANIA, 4)), 0.0),
             "autonomia_d": round(bb.autonomia_doby(par, w["srednie_dobowe_kWh"]), 2),
             "t_jazdy_min_h": godzin_C if scen == "C" else np.nan,

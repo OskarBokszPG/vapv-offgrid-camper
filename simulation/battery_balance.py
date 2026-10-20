@@ -26,7 +26,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -164,9 +164,13 @@ def temperatura_ogniw(t_powietrza_C: np.ndarray,
 
         tau * dT_bat/dt = T_kab - T_bat
 
-    rozwiązany schematem jawnym z krokiem godzinowym:
+rozwiązany dokładnie przy stałej temperaturze otoczenia w kroku:
 
-        T_bat(t) = T_bat(t-1) + (T_kab(t) - T_bat(t-1)) * dt / tau
+        T_bat(t) = T_kab(t) + [T_bat(t-1) - T_kab(t)] * exp(-dt / tau)
+
+    Postać wykładnicza zastąpiła schemat jawny: przy kroku godzinowym
+    porównywalnym ze stałą czasową schemat jawny daje przebieg zgrubny,
+    a przy dt > tau prowadziłby do przeregulowania.
 
     Temperatura otoczenia magazynu (T_kab) to temperatura powietrza, a w
     godzinach pracy ogrzewania postojowego — nastawa termostatu, bo magazyn
@@ -190,9 +194,9 @@ def temperatura_ogniw(t_powietrza_C: np.ndarray,
 
     wynik = np.empty(n, dtype=float)
     stan = float(t_poczatkowa_C if t_poczatkowa_C is not None else t_kabiny[0])
-    wspolczynnik = KROK_H / par.tau_bat_h
+    zanik = float(np.exp(-KROK_H / par.tau_bat_h))
     for i in range(n):
-        stan += (t_kabiny[i] - stan) * wspolczynnik
+        stan = t_kabiny[i] + (stan - t_kabiny[i]) * zanik
         wynik[i] = stan
     return wynik
 
@@ -317,7 +321,7 @@ def bilans_godzinowy(
     profil_dobowy_local: np.ndarray | None = None,
     obciazenie_dc_kwh: np.ndarray | None = None,
     obciazenie_ac_kwh: np.ndarray | None = None,
-    falownik_jalowy_kwh: np.ndarray | None = None,
+    straty_toru_kwh: np.ndarray | None = None,
     doplyw_alternatora_kwh: np.ndarray | None = None,
     temperatura_ogniw_C: np.ndarray | None = None,
     rozbieg_godzin: int = 0,
@@ -337,7 +341,7 @@ def bilans_godzinowy(
         profil_dobowy_local -- 24 wartości profilu w czasie LOKALNYM
         obciazenie_dc_kwh -- odbiory zasilane wprost z szyny stałoprądowej, kWh
         obciazenie_ac_kwh -- odbiory za falownikiem, kWh
-        falownik_jalowy_kwh -- pobór własny falownika odniesiony do szyny
+        straty_toru_kwh -- straty torów zasilania odniesione do szyny
                           stałoprądowej, kWh; podawany osobno, ponieważ zależy
                           od godzin załączenia falownika, a nie od energii
                           wydanej odbiornikom
@@ -432,19 +436,16 @@ def bilans_godzinowy(
                     f"{n}. Długości muszą być równe."
                 )
 
-    jalowy_podany = falownik_jalowy_kwh is not None
-    jalowy = (np.zeros(n) if falownik_jalowy_kwh is None
-              else np.asarray(falownik_jalowy_kwh, dtype=float))
+    jalowy_podany = straty_toru_kwh is not None
+    jalowy = (np.zeros(n) if straty_toru_kwh is None
+              else np.asarray(straty_toru_kwh, dtype=float))
     if jalowy.size != n:
         raise ValueError(
-            f"falownik_jalowy_kwh ma {jalowy.size} wartości, a szereg "
+            f"straty_toru_kwh ma {jalowy.size} wartości, a szereg "
             f"generacji {n}. Długości muszą być równe."
         )
-    if np.any(jalowy > 0.0) and not np.any(obc_ac > 0.0):
-        raise ValueError(
-            "Podano pobór jałowy falownika, choć profil odbiorów prądu "
-            "przemiennego jest zerowy — falownik byłby załączony bez powodu."
-        )
+    if np.any(jalowy < 0.0):
+        raise ValueError("straty_toru_kwh zawiera wartości ujemne.")
 
     # --- dopływ z alternatora i temperatura ogniw -----------------------
     alternator = (np.zeros(n) if doplyw_alternatora_kwh is None
@@ -497,7 +498,7 @@ def bilans_godzinowy(
         # Zapotrzebowanie sprowadzone na stronę stałoprądową. Odbiory
         # stałoprądowe wchodzą bez przetwarzania. Dla odbiorów prądu
         # przemiennego są dwa zapisy i NIE WOLNO ich łączyć:
-        #   - podany jawny człon strat falownika (falownik_jalowy_kwh):
+        #   - podany jawny człon strat toru (straty_toru_kwh):
         #     zapotrzebowanie to energia użyteczna POWIĘKSZONA o ten człon,
         #     bo zawiera on już pobór jałowy i straty zależne od obciążenia
         #     (model P_strat = P_0 + a*P + b*P^2 z loads.py),
@@ -599,6 +600,10 @@ def bilans_godzinowy(
 
     # Energia faktycznie dostarczona odbiornikom, po obu szynach.
     e_pokryte = (e_bezposrednie + e_z_magazynu) * wsp_uzyteczne
+    # Rozdzielenie na pokrycie bezpośrednie i z magazynu: potrzebne do
+    # przypisania energii dostarczonej odbiornikom do źródeł (SSR_PV).
+    e_pokryte_bezp = e_bezposrednie * wsp_uzyteczne
+    e_pokryte_mag = e_z_magazynu * wsp_uzyteczne
 
     przebiegi = pd.DataFrame(
         {
@@ -611,6 +616,8 @@ def bilans_godzinowy(
             "E_do_magazynu_kWh": e_do_magazynu,
             "E_z_magazynu_kWh": e_z_magazynu,
             "E_pokryte_kWh": e_pokryte,
+            "E_pokryte_bezposrednio_kWh": e_pokryte_bezp,
+            "E_pokryte_z_magazynu_kWh": e_pokryte_mag,
             "E_deficyt_kWh": e_deficyt,
             "E_odrzucona_kWh": e_odrzucona,
             "E_curt_kWh": e_curt,
@@ -651,18 +658,18 @@ def oblicz_wskazniki(przebiegi: pd.DataFrame,
 
     Przy wspólnym magazynie energii z generatora i z alternatora nie da się
     rozdzielić po stronie odbiorników: obie wchodzą do tego samego zasobu.
-    Udział generatora wyznaczany jest więc regułą proporcjonalną na szynie
-    stałoprądowej:
+    Przyjęto regułę przypisania proporcjonalną do udziału źródeł
+    w ładowaniu magazynu:
 
-        SSR_PV = E_PV,szyna / (E_PV,szyna + E_alt,szyna)
+        SSR_PV = (E_bezp,odb + u_PV * E_mag,odb) / E_żąd
+        u_PV   = E_lad,PV / (E_lad,PV + E_lad,alt)
 
-    gdzie obie energie mierzone są NA SZYNIE, to jest za regulatorem i za
-    przetwornicą stałoprądową. Uzasadnienie: obie przechodzą dalej przez te
-    same straty (magazyn, falownik, pobory własne), więc przy pomijalnej
-    zmianie stanu magazynu w rozpatrywanym okresie udział w dopływie równa
-    się udziałowi w energii dostarczonej odbiornikom. Dla okresów krótszych
-    niż rok, w których zmiana stanu magazynu nie jest pomijalna, licznik
-    i mianownik koryguje się o tę zmianę.
+    gdzie E_bezp,odb to energia dostarczona odbiornikom bezpośrednio
+    z generatora, E_mag,odb — energia dostarczona z magazynu, a E_żąd —
+    energia wymagana na zaciskach odbiorników. Wskaźnik mierzony jest po
+    stronie odbiorników, więc spełnia SSR_PV <= 1 - LPSP_E; udział
+    generatora w samym dopływie na szynę raportowany jest osobno jako
+    wielkość pomocnicza.
 
     Autonomia magazynu wyrażona jest w dobach: energia użyteczna magazynu
     odniesiona do średniego dobowego zapotrzebowania odbiorników.
@@ -695,8 +702,31 @@ def oblicz_wskazniki(przebiegi: pd.DataFrame,
     e_alt_szyna = e_alternator / wsp
     doplyw = e_pv_szyna + e_alt_szyna
 
+    # Przypisanie energii oddanej z magazynu do źródeł: proporcjonalnie do
+    # ich udziału w ładowaniu, bo magazyn nie rozróżnia pochodzenia energii.
+    # Pokrycie bezpośrednie pochodzi w całości z generatora.
+    e_lad_pv = float(przebiegi["E_do_magazynu_kWh"].sum())
+    e_lad_alt = e_alternator
+    udzial_pv_mag = (e_lad_pv / (e_lad_pv + e_lad_alt)
+                     if (e_lad_pv + e_lad_alt) > 0.0 else 0.0)
+    e_pokryte_pv = (float(przebiegi["E_pokryte_bezposrednio_kWh"].sum())
+                    + udzial_pv_mag
+                    * float(przebiegi["E_pokryte_z_magazynu_kWh"].sum()))
+
+    # Najdłuższa nieprzerwana przerwa w pokryciu obciążenia, h. Wskaźnik
+    # energetyczny nie opisuje ciągłości zasilania, więc liczony jest osobno.
+    deficyt_h = (przebiegi["E_deficyt_kWh"] > 1e-9).to_numpy()
+    najdluzsza, biezaca = 0, 0
+    for jest in deficyt_h:
+        biezaca = biezaca + 1 if jest else 0
+        najdluzsza = max(najdluzsza, biezaca)
+
     wynik = {
-        "SSR_PV": (e_pv_szyna / doplyw) if doplyw > 0.0 else 0.0,
+        "SSR_PV": (e_pokryte_pv / e_obciazenie) if e_obciazenie > 0.0 else 0.0,
+        "udzial_PV_w_dopływie": (e_pv_szyna / doplyw) if doplyw > 0.0 else 0.0,
+        "udzial_PV_w_ladowaniu": udzial_pv_mag,
+        "E_pokryte_PV_kWh": e_pokryte_pv,
+        "najdluzsza_przerwa_h": int(najdluzsza),
         "E_pv_szyna_kWh": e_pv_szyna,
         "E_alt_szyna_kWh": e_alt_szyna,
         "SSR": e_pokryte / e_obciazenie,
@@ -713,12 +743,48 @@ def oblicz_wskazniki(przebiegi: pd.DataFrame,
         "E_grzalka_kWh": suma("E_grzalka_kWh"),
         "E_pv_kWh": float(przebiegi["P_pv_kW"].sum()),
         "godziny_deficytu": godziny_deficytu,
+        "SoC_koncowy_wzgledny": (float(przebiegi["SoC_wzgledny"].iloc[-1])
+                                 if "SoC_wzgledny" in przebiegi.columns
+                                 and len(przebiegi) else 0.0),
         "SoC_min_wzgledny": float(przebiegi["SoC_wzgledny"].min()),
         "srednie_dobowe_kWh": srednie_dobowe,
     }
     if "T_ogniw_C" in przebiegi.columns:
         wynik["godziny_blokady"] = int((przebiegi["T_ogniw_C"] <= 0.0).sum())
     return wynik
+
+
+def kontrola_tozsamosci(przebiegi: pd.DataFrame,
+                        parametry: ParametryUkladu | None = None,
+                        wskazniki: dict | None = None) -> dict[str, float]:
+    """
+    Tożsamość przypisania energii dostarczonej odbiornikom.
+
+        E_PV,odb + E_alt,odb + E_def = E_żąd
+
+    gdzie E_żąd to energia wymagana na zaciskach odbiorników, a pierwsze
+    dwa człony są jej częściami pokrytymi z generatora i z alternatora.
+    Energia oddana z magazynu dzieli się między źródła proporcjonalnie do
+    ich udziału w ładowaniu; energia zgromadzona przed początkiem okresu
+    podlega temu samemu podziałowi, co jest przyjętym uproszczeniem reguły.
+
+    Zwraca składniki i resztę bezwzględną oraz względną.
+    """
+    w = (wskazniki if wskazniki is not None
+         else oblicz_wskazniki(przebiegi, parametry))
+    zadana = float(w["E_obciazenie_kWh"])
+    pv = float(w["E_pokryte_PV_kWh"])
+    alt = float(w["E_pokryte_kWh"]) - pv
+    deficyt = float(w["E_deficyt_kWh"])
+    reszta = pv + alt + deficyt - zadana
+    return {
+        "E_zadana_kWh": zadana,
+        "E_pokryte_PV_kWh": pv,
+        "E_pokryte_alternator_kWh": alt,
+        "E_deficyt_kWh": deficyt,
+        "reszta_kWh": reszta,
+        "reszta_wzgledna": reszta / zadana if zadana > 0.0 else 0.0,
+    }
 
 
 def kontrola_zamkniecia(przebiegi: pd.DataFrame,

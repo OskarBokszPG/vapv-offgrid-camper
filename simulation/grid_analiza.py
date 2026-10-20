@@ -23,7 +23,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -50,8 +50,16 @@ from config import LOCATIONS
 # o większym prądzie i zalecany wariant zasilania laptopa. Lokalizację
 # i rok wybiera się tą samą definicją co w ocenie wymagań: lokalizacja
 # o największym wskaźniku W1a, a w niej rok najgorszy.
+# Pojemnosc konfiguracji odniesienia analizy wrazliwosci. Ustawiana
+# w main() na pojemnosc projektowa, czyli najmniejsza spelniajaca
+# wymagania W1a-W4: analiza musi dotyczyc tej konfiguracji, na ktorej
+# oparto dobor (komentarz K96).
 OAT_MAGAZYN_AH = 200
-OAT_SCENARIUSZ = "A-DC"
+# Wariant projektowy: zasilanie laptopa przez falownik. Jest on
+# niekorzystniejszy od wariantu z przetwornicą o straty falownika,
+# a dobór pojemności magazynu oparto właśnie na nim, więc analiza
+# wrażliwości musi dotyczyć tego samego wariantu (komentarz K96).
+OAT_SCENARIUSZ = "A-AC"
 OAT_LADOWARKA = "Orion XS 50"
 OAT_MODUL = "AIKO 470 Wp"
 
@@ -164,8 +172,9 @@ def _odniesienie_oat(wyniki: pd.DataFrame) -> tuple[str, int]:
     return klucz, rok
 
 
-def _przebieg_oat(klucz_lok: str, rok: int, **nadpisania) -> dict[str, float]:
-    """Jeden przebieg konfiguracji odniesienia z podmienionym parametrem."""
+def _jeden_przebieg_oat(klucz_lok: str, rok: int,
+                        **nadpisania) -> dict[str, float]:
+    """Jeden przebieg roczny konfiguracji odniesienia z podmianą parametru."""
     loc = LOCATIONS[klucz_lok]
     par = bb.ParametryUkladu(
         pojemnosc_kwh=run_grid.pojemnosc_kwh(OAT_MAGAZYN_AH),
@@ -180,7 +189,33 @@ def _przebieg_oat(klucz_lok: str, rok: int, **nadpisania) -> dict[str, float]:
                                          loads.MODEL_CHLODZIARKI),
         podbicie_K=nadpisania.get("podbicie_K", loads.KABINA_PODBICIE_BAZOWE_K))
     return {"LPSP": w["LPSP"], "SSR_PV": w["SSR_PV"],
-            "E_deficyt_kWh": w["E_deficyt_kWh"]}
+            "E_deficyt_kWh": w["E_deficyt_kWh"],
+            "godziny_deficytu": w["godziny_deficytu"],
+            "najdluzsza_przerwa_h": w["najdluzsza_przerwa_h"]}
+
+
+def _przebieg_oat(klucz_lok: str, rok: int, **nadpisania) -> dict[str, float]:
+    """
+    Przypadek najgorszy dla jednego zestawu założeń.
+
+    Wymaganie W1a ocenia rok najgorszy, a rok najgorszy może się zmieniać
+    wraz z parametrem (komentarz K96). Dlatego każdy wariant liczony jest
+    dla wszystkich lokalizacji i wszystkich lat szeregu, a do zestawienia
+    wchodzi przebieg o największym wskaźniku niedoboru. Argumenty
+    ``klucz_lok`` i ``rok`` pozostają jako wartości domyślne na wypadek
+    przebiegu pojedynczego.
+    """
+    lata = range(config.SERIES_START_YEAR, config.SERIES_END_YEAR + 1)
+    najgorszy: dict[str, float] | None = None
+    for klucz in LOCATIONS:
+        for r in lata:
+            wynik = _jeden_przebieg_oat(klucz, r, **nadpisania)
+            if najgorszy is None or wynik["LPSP"] > najgorszy["LPSP"]:
+                wynik["lokalizacja_najgorsza"] = LOCATIONS[klucz].label
+                wynik["rok_najgorszy"] = r
+                najgorszy = wynik
+    assert najgorszy is not None
+    return najgorszy
 
 
 def _wiersz(parametr: str, odniesienie: str, zmieniona: str,
@@ -246,8 +281,8 @@ def analiza_oat(wyniki: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     odbiorniki = [
         ("pobór łącza satelitarnego", "STARLINK_MOC_W", 25.0, "W", 0),
         ("pobór łącza satelitarnego", "STARLINK_MOC_W", 40.0, "W", 0),
-        ("pobór laptopa", "LAPTOP_MOC_AC_W", 7.0, "W", 0),
-        ("pobór laptopa", "LAPTOP_MOC_AC_W", 50.0, "W", 0),
+        ("pobór laptopa", "LAPTOP_MOC_W", 7.0, "W", 0),
+        ("pobór laptopa", "LAPTOP_MOC_W", 50.0, "W", 0),
         ("oświetlenie i gniazda USB", "LED_USB_WH_D", 50.0, "Wh/d", 0),
         ("oświetlenie i gniazda USB", "LED_USB_WH_D", 100.0, "Wh/d", 0),
         ("pobór chłodziarki", "CHLODZIARKA_AH_H_REF",
@@ -325,11 +360,11 @@ def analiza_oat(wyniki: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         ("założenia o odbiornikach niekorzystne",
          "chłodziarka: stały pobór; laptop 50 W; łącze satelitarne 40 W",
          {"model_chlodziarki": "staly"},
-         [("LAPTOP_MOC_AC_W", 50.0), ("STARLINK_MOC_W", 40.0)]),
+         [("LAPTOP_MOC_W", 50.0), ("STARLINK_MOC_W", 40.0)]),
         ("założenia o odbiornikach korzystne",
          "chłodziarka −20 %; laptop 7 W; łącze satelitarne 25 W", {},
          [("CHLODZIARKA_AH_H_REF", loads.CHLODZIARKA_AH_H_REF * 0.8),
-          ("LAPTOP_MOC_AC_W", 7.0), ("STARLINK_MOC_W", 25.0)]),
+          ("LAPTOP_MOC_W", 7.0), ("STARLINK_MOC_W", 25.0)]),
         ("zabudowa cieplejsza i zacieniona",
          "podbicie temperatury 10 K; zacienienie 10 %",
          {"podbicie_K": 10.0}, []),
@@ -417,6 +452,19 @@ def przenosnosc(technologie: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(wiersze)
 
 
+def pojemnosc_projektowa_ah(wymagania: pd.DataFrame) -> int:
+    """Najmniejsza pojemnosc LFP spelniajaca W1a-W4 we wszystkich lokalizacjach."""
+    lfp = wymagania[(wymagania.modul == OAT_MODUL)
+                    & (wymagania.ladowarka == OAT_LADOWARKA)
+                    & wymagania.magazyn.str.startswith("LFP")].copy()
+    lfp["ah"] = lfp.magazyn.str.extract(r"(\d+)").astype(int)
+    zdane = lfp[lfp["spelnia_W1_W4"]].groupby("ah")["lokalizacja"].nunique()
+    pelne = [ah for ah, n in zdane.items() if n == lfp.lokalizacja.nunique()]
+    if not pelne:
+        raise RuntimeError("żadna pojemność LFP nie spełnia W1a-W4")
+    return int(min(pelne))
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     config.ensure_dirs()
@@ -433,6 +481,12 @@ def main() -> int:
     wymagania.to_csv(config.OUT_DIR / "requirements_check.csv", index=False)
     print("  requirements_check.csv: %d konfiguracji, %d spełnia W1-W4"
           % (len(wymagania), int(wymagania["spelnia_W1_W4"].sum())))
+
+    # Konfiguracja odniesienia analizy wrazliwosci: pojemnosc projektowa.
+    global OAT_MAGAZYN_AH
+    OAT_MAGAZYN_AH = pojemnosc_projektowa_ah(wymagania)
+    print("  konfiguracja odniesienia OAT: LFP %d Ah, scenariusz %s"
+          % (OAT_MAGAZYN_AH, OAT_SCENARIUSZ))
 
     technologie = porownanie_technologii(wyniki)
     technologie.to_csv(config.OUT_DIR / "grid_technologie.csv", index=False)

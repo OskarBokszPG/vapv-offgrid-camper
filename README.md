@@ -61,10 +61,29 @@ wyłączone z repozytorium: ich zawartość odtwarza się z danych wejściowych.
    niedobór, dopływ z alternatora przez ładowarkę stałoprądową, blokada
    ładowania w niskiej temperaturze, samorozładowanie. Model magazynu
    i wskaźniki liczone są poza SAM, bo SAM nie podaje wskaźnika niedoboru
-   zasilania ani nie modeluje alternatora.
+   zasilania ani nie modeluje alternatora. Cechy modelu istotne dla
+   wyników:
+   - **granica zapotrzebowania na zaciskach odbiorników** — moc laptopa
+     odnosi się w obu wariantach do jego wejścia stałoprądowego, a straty
+     zasilacza sieciowego, przetwornicy i falownika są osobnymi pozycjami
+     toru, więc oba warianty zasilania opisują tę samą usługę energetyczną;
+   - **dwustronne ograniczenie ładowarki** — moc wyjściowa to
+     `min(η·U_we·I_we,max; U_wy·I_wy,max)`, dodatkowo ograniczona mocą
+     dostępną z alternatora po pokryciu odbiorów pokładowych;
+   - **jeden okres rozbiegowy** — dziesięciolecie liczone jest w jednym
+     ciągu, ze stanem naładowania przenoszonym z roku na rok, a z oceny
+     wyłączony jest tylko pierwszy miesiąc szeregu;
+   - **krok cieplny wykładniczy** — temperatura ogniw liczona jako
+     `T_kab + (T_bat − T_kab)·exp(−Δt/τ)`, bez przeregulowania schematu
+     jawnego;
+   - **ograniczenie regulatora** — próg mocy wyjściowej liczony przy
+     napięciu znamionowym magazynu, a energia obcięta raportowana osobno.
 6. **Wskaźniki.** Z przebiegu liczone są: energetyczny wskaźnik niedoboru
    zasilania (LPSP), udział pokrycia z generatora (SSR), autonomia magazynu
-   i najmniejszy dzienny czas jazdy wyznaczany bisekcją.
+   i najmniejszy dzienny czas jazdy wyznaczany bisekcją. Energię oddaną
+   z magazynu przypisuje się źródłom proporcjonalnie do ich udziału
+   w ładowaniu, więc udział generatora nie przekracza udziału całej energii
+   dostarczonej; tożsamość tego przypisania sprawdza test jednostkowy.
 7. **Siatka konfiguracji.** `run_grid.py` przechodzi po kombinacjach modułu,
    magazynu, ładowarki, lokalizacji, roku i scenariusza; `grid_analiza.py`
    ocenia wymagania projektowe i prowadzi analizę wrażliwości metodą zmiany
@@ -105,7 +124,11 @@ leżą na dysku.
 
 ### Kontrole i warianty
 
-- `tests_bilans.py` — zestaw testów modelu bilansu i profili obciążeń.
+- `tests_bilans.py` — zestaw testów modelu bilansu i profili obciążeń;
+  testy wymagające plików zasobu są pomijane z komunikatem, gdy danych nie
+  ma.
+- `przerwy.py` — godziny z niedoborem i najdłuższa nieprzerwana przerwa
+  w pokryciu obciążenia dla konfiguracji projektowej.
 - `weather_qc.py`, `weather_validation.py` — kontrola danych pogodowych
   i porównanie z danymi naziemnymi.
 - `fit_check.py`, `module_effect_check.py`, `thermal_check.py` — kontrole
@@ -119,6 +142,23 @@ leżą na dysku.
 - `grid_shift_check.py` — wpływ przesunięcia punktu siatki danych
   satelitarnych na sumy roczne.
 - `fetch_weather.py` — pobranie szeregów PVGIS według `MANIFEST.md`.
+
+## Wyniki odniesienia
+
+Wartości, na które powinien trafić odtworzony potok (szereg 2014--2023,
+moduł AIKO 470 Wp, ładowarka Orion XS 50, liniowy model poboru
+chłodziarki):
+
+| Wielkość | Wartość |
+|---|---|
+| Najmniejsza pojemność spełniająca W1a–W4 w scenariuszu A-AC | 300 Ah |
+| LPSP w roku najgorszym przy 300 Ah (Łeba / Suwałki / Lesko) | 4,2 / 4,1 / 2,1 % |
+| Okno miesięczne W1b | IV–IX, IV–IX, III–IX |
+| Najmniejszy dzienny czas jazdy W3 | 0,59 / 0,56 / 0,31 h/d |
+| Najmniejsza pojemność w scenariuszu A-DC | 50 Ah |
+
+Przebieg kontrolny jednego roku (Łeba 2016, 300 Ah, A-AC) daje
+LPSP = 0,0416 i SSR_PV = 0,922.
 
 ## Wymagania i instalacja
 
@@ -154,9 +194,17 @@ Testy modelu bilansu i profili obciążeń:
 .venv\Scripts\python.exe simulation\tests_bilans.py
 ```
 
-Bez pobranych danych przechodzi 19 z 22 testów; trzy pozostałe wymagają
-plików zasobu zbudowanych według `MANIFEST.md`, bo liczą pełny przebieg
-godzinowy.
+Bez pobranych danych przechodzi 20 z 23 testów, a trzy pozostałe są
+pomijane z komunikatem: liczą pełny przebieg godzinowy i wymagają plików
+zasobu zbudowanych według `MANIFEST.md`.
+
+Przebieg kontrolny na jednym pliku zasobu, bez całego katalogu danych:
+
+```powershell
+.venv\Scripts\python.exe simulation\run_all.py --kontrola `
+    sciezka\do\Leba_sarah3_2016.csv --lokalizacja Łeba --rok 2016 `
+    --pojemnosc 300
+```
 
 Cały potok, od kontroli danych do plików CSV z wynikami:
 
@@ -164,8 +212,12 @@ Cały potok, od kontroli danych do plików CSV z wynikami:
 .venv\Scripts\python.exe simulation\run_all.py
 ```
 
-Pełny przebieg zajmuje kilka minut; wyniki trafiają do `simulation/out/`
-wraz z manifestami przebiegów.
+Potok wykonuje kolejno: kontrolę danych pogodowych, zasoby słoneczne,
+profile obciążeń, uzysk generatora, siatkę przebiegów, ocenę wymagań
+W1a–W4 wraz z analizą wrażliwości i scenariuszami łącznymi, raport siatki,
+kontrolę ograniczenia regulatora, godziny niedoboru oraz wariant z modułem
+podnoszonym. Pełny przebieg zajmuje kilkadziesiąt minut; wyniki trafiają
+do `simulation/out/` wraz z manifestami przebiegów.
 
 ## Ograniczenia modelu
 

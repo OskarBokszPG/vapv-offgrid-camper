@@ -21,7 +21,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -45,7 +45,11 @@ from config import LOCATIONS
 PRZEBIEG = "raport_siatki"
 
 MODUL_ZALECANY = "AIKO 470 Wp"
-SCENARIUSZ_ZALECANY = "A-DC"
+# Scenariusz konfiguracji projektowej: ten sam, w ktorym oceniane jest
+# wymaganie W1a, czyli wariant z zasilaniem laptopa przez falownik.
+# Zestawianie lancucha energii z innego wariantu z wynikami oceny wymagan
+# dawaloby tabele o roznych podstawach (komentarz K89, K90).
+SCENARIUSZ_ZALECANY = "A-AC"
 LADOWARKA_ZALECANA = "Orion XS 50"
 
 PROGI_W1 = (0.03, 0.05, 0.07)
@@ -224,6 +228,9 @@ def bilans_przykladowy(magazyn: str, lokalizacja: str, rok: int) -> pd.DataFrame
     # inaczej reszta równania kontrolnego zawierałaby różnicę stanów.
     stan_przed = float(przebiegi["SoC_kWh"].iloc[run_grid.ROZBIEG_GODZIN - 1])
     kontrola = bb.kontrola_zamkniecia(oceniane, par, stan_przed)
+    # Tozsamosc przypisania energii do zrodel: PV + alternator + niedobor
+    # rowna sie energii wymaganej na zaciskach odbiornikow.
+    tozsamosc = bb.kontrola_tozsamosci(oceniane, par, w)
     stan_poczatkowy = stan_przed
     stan_koncowy = float(oceniane["SoC_kWh"].iloc[-1])
     pozycje = [
@@ -240,6 +247,13 @@ def bilans_przykladowy(magazyn: str, lokalizacja: str, rok: int) -> pd.DataFrame
         ("energia nieprzyjęta (pełny lub zimny magazyn)", w["E_curt_kWh"]),
         ("energia niedostarczona odbiornikom", w["E_deficyt_kWh"]),
         ("reszta równania kontrolnego", kontrola["reszta_kWh"]),
+        ("energia wymagana na zaciskach odbiorników",
+         tozsamosc["E_zadana_kWh"]),
+        ("w tym pokryta z generatora", tozsamosc["E_pokryte_PV_kWh"]),
+        ("w tym pokryta z alternatora",
+         tozsamosc["E_pokryte_alternator_kWh"]),
+        ("w tym niedostarczona", tozsamosc["E_deficyt_kWh"]),
+        ("reszta tożsamości przypisania", tozsamosc["reszta_kWh"]),
     ]
     tab = pd.DataFrame(pozycje, columns=["pozycja", "energia_kWh"])
     tab.insert(0, "rok", rok)

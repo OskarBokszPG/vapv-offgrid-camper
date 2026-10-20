@@ -26,7 +26,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -98,7 +98,7 @@ def t_jalowy_podnosi_lpsp():
     jalowy = np.full(moc.size, 0.022)
     _, bez = bb.bilans_godzinowy(moc, obciazenie_ac_kwh=obc)
     _, z = bb.bilans_godzinowy(moc, obciazenie_ac_kwh=obc,
-                               falownik_jalowy_kwh=jalowy)
+                               straty_toru_kwh=jalowy)
     assert z["LPSP"] > bez["LPSP"], (z["LPSP"], bez["LPSP"])
 
 
@@ -229,9 +229,10 @@ def t_temperatura_ogniw():
     wynik = bb.temperatura_ogniw(powietrze, parametry=par, t_poczatkowa_C=0.0)
     assert wynik[0] < wynik[1] < wynik[-1], wynik[:3]
     assert abs(wynik[-1] - 10.0) < 0.1, wynik[-1]
-    # Po jednej stałej czasowej różnica maleje do ok. 1/e wartości początkowej.
+    # Krok wykładniczy: po jednej stałej czasowej różnica maleje dokładnie
+    # do 1/e wartości początkowej, czyli do około 36,8 %.
     po_tau = wynik[2]            # 3 godziny przy kroku 1 h
-    assert 0.25 < (10.0 - po_tau) / 10.0 < 0.35, po_tau
+    assert 0.36 < (10.0 - po_tau) / 10.0 < 0.38, po_tau
 
     # Ogrzewanie postojowe podnosi temperaturę w zabudowie do nastawy.
     zimno = np.full(n, -10.0)
@@ -316,7 +317,7 @@ def t_krzywa_falownika():
     assert abs(float(loads.falownik_straty_w(30.0)) - 23.7) < 0.2
 
 
-@test("B2: SSR_PV to udział generatora w dopływie na szynę")
+@test("B2: SSR_PV mierzony po stronie odbiorników nie przekracza 1-LPSP")
 def t_ssr_proporcjonalny():
     par = bb.ParametryUkladu()
     moc = _generacja()
@@ -327,13 +328,35 @@ def t_ssr_proporcjonalny():
     _, bez_alt = bb.bilans_godzinowy(moc, par, obciazenie_dc_kwh=obc)
     _, z_alt = bb.bilans_godzinowy(moc, par, obciazenie_dc_kwh=obc,
                                    doplyw_alternatora_kwh=alt)
-    # Bez alternatora cały dopływ pochodzi z generatora.
-    assert blisko(bez_alt["SSR_PV"], 1.0, 1e-9), bez_alt["SSR_PV"]
-    # Z alternatorem udział maleje i równa się ilorazowi energii na szynie.
+    # Bez alternatora cała energia dostarczona pochodzi z generatora, więc
+    # wskaźnik pokrycia z generatora równa się wskaźnikowi pokrycia.
+    assert blisko(bez_alt["SSR_PV"], bez_alt["SSR"], 1e-9), bez_alt["SSR_PV"]
+    # Nierówność, której naruszenie wskazał promotor: udział generatora nie
+    # może przekraczać udziału całej energii dostarczonej.
+    for w in (bez_alt, z_alt):
+        assert w["SSR_PV"] <= 1.0 - w["LPSP"] + 1e-9, (w["SSR_PV"], w["LPSP"])
+    # Alternator zmniejsza udział generatora w pokryciu.
+    assert z_alt["SSR_PV"] < bez_alt["SSR_PV"] + 1e-9
+    # Udział w samym dopływie na szynę zostaje jako wielkość pomocnicza.
     oczekiwany = (z_alt["E_pv_szyna_kWh"]
                   / (z_alt["E_pv_szyna_kWh"] + z_alt["E_alt_szyna_kWh"]))
-    assert blisko(z_alt["SSR_PV"], oczekiwany, 1e-12)
-    assert z_alt["SSR_PV"] < 1.0
+    assert blisko(z_alt["udzial_PV_w_dopływie"], oczekiwany, 1e-12)
+
+
+@test("B5: tożsamość przypisania energii dostarczonej i niedostarczonej")
+def t_tozsamosc_przypisania():
+    par = bb.ParametryUkladu(pojemnosc_kwh=0.5)
+    moc = _generacja()
+    obc = np.full(moc.size, 2.0 / 24.0)
+    alt = np.zeros(moc.size)
+    alt[::48] = 0.3
+
+    przebiegi, w = bb.bilans_godzinowy(moc, par, obciazenie_dc_kwh=obc,
+                                       doplyw_alternatora_kwh=alt)
+    kontrola = bb.kontrola_tozsamosci(przebiegi, par, w)
+    assert w["E_deficyt_kWh"] > 0.0, "test wymaga wystąpienia deficytu"
+    assert abs(kontrola["reszta_wzgledna"]) < 1e-9, kontrola
+    assert kontrola["E_pokryte_alternator_kWh"] > 0.0, kontrola
 
 
 @test("B4: bilans energii na szynie zamyka się ze wszystkimi członami")
@@ -461,16 +484,26 @@ def main() -> int:
     print("Testy modelu bilansu, profili obciążeń i formatowania liczb")
     print("=" * 78)
     bledy = 0
+    pominiete = 0
     for opis, funkcja in TESTY:
         try:
             funkcja()
             print("  [OK]    %s" % opis)
+        except FileNotFoundError as brak:
+            # Testy liczace pelny przebieg wymagaja plikow zasobu
+            # slonecznego, ktorych repozytorium kodu nie zawiera. Brak
+            # danych nie jest bledem modelu, wiec test jest pomijany.
+            pominiete += 1
+            print("  [POMINIĘTY] %s" % opis)
+            print("              brak danych wejściowych: %s"
+                  % getattr(brak, "filename", brak))
         except Exception:
             bledy += 1
             print("  [BŁĄD]  %s" % opis)
             traceback.print_exc()
     print("-" * 78)
-    print("przeszło %d z %d" % (len(TESTY) - bledy, len(TESTY)))
+    print("przeszło %d z %d, pominięto %d"
+          % (len(TESTY) - bledy - pominiete, len(TESTY), pominiete))
     return 1 if bledy else 0
 
 

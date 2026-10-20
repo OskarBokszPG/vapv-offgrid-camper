@@ -27,7 +27,7 @@ Wsparcie AI / Narzędzia: Kod źródłowy napisany z wykorzystaniem narzędzia
                          i kontrolami bilansu opisanymi w pracy.
 
 Data utworzenia: 2026-10-19
-Ostatnia modyfikacja: 2026-10-19
+Ostatnia modyfikacja: 2026-10-20
 Wersja: 1.0.0
 """
 
@@ -96,7 +96,12 @@ STARLINK_GODZINY = (9, 17)          # czas lokalny, [od, do)
 # baterii, przeliczona na stronę przemienną przez przyjętą sprawność zasilacza.
 # Wynik takiego pomiaru będzie dolnym oszacowaniem, ponieważ laptop na baterii
 # ogranicza wydajność układu.
-LAPTOP_MOC_AC_W = 30.0
+# Moc laptopa odniesiona do jego wejscia stalopradowego, czyli do
+# zaciskow odbiornika. Ta sama wartosc obowiazuje w obu wariantach
+# zasilania, wiec porownanie dotyczy tej samej uslugi energetycznej:
+# w wariancie AC dochodzi zasilacz sieciowy i falownik, w wariancie DC
+# przetwornica 12 -> 19,5 V. Straty obu torow sa osobnymi pozycjami.
+LAPTOP_MOC_W = 30.0
 # Dolna granica zakresu analizy wrażliwości jest OBLICZONA z danych
 # producenta: pojemność baterii 52,5 Wh i deklarowany czas pracy do
 # 8 h 15 min dają ok. 6,4 W po stronie baterii, co po przeliczeniu przez
@@ -107,7 +112,8 @@ LAPTOP_OAT_W = (7.0, 50.0)
 LAPTOP_GODZINY = (9, 17)
 # Wariant stałoprądowy: przetwornica 12 -> 19,5 V. Sprawność przyjęta,
 # bez zweryfikowanego źródła.
-LAPTOP_DC_SPRAWNOSC = 0.90
+LAPTOP_DC_SPRAWNOSC = 0.90        # przetwornica 12 -> 19,5 V
+LAPTOP_AC_SPRAWNOSC = 0.90        # zasilacz sieciowy laptopa
 LAPTOP_DC_OAT = (0.85, 0.93)
 
 # --- falownik Xantrex 1800i ---
@@ -494,14 +500,23 @@ def zbuduj_profil(loc: Location, year: int, scenariusz: str,
     # --- laptop w wariancie AC albo DC ---
     laptop_ac = np.zeros(len(idx))
     laptop_dc = np.zeros(len(idx))
+    straty_dc = np.zeros(len(idx))
     if wariant_laptopa == "AC":
-        p_ac = np.where(maska_lap, LAPTOP_MOC_AC_W, 0.0)
+        # Moc po stronie 230 V to moc na zaciskach laptopa podzielona przez
+        # sprawnosc zasilacza sieciowego; falownik widzi dopiero tę moc.
+        p_ac = np.where(maska_lap,
+                        LAPTOP_MOC_W / LAPTOP_AC_SPRAWNOSC, 0.0)
         stany = falownik_stany(
             scenariusz, lok, uzytkowanie,
             poza_praca="wyszukiwanie" if falownik_calodobowo else FALOWNIK_POZA_PRACA)
         laptop_ac = falownik_pobor_dc_wh(p_ac, stany)
     else:
-        laptop_dc = np.where(maska_lap, LAPTOP_MOC_AC_W / LAPTOP_DC_SPRAWNOSC, 0.0)
+        # Zapotrzebowanie laptopa i strata przetwornicy jako dwie
+        # pozycje: pierwsza wchodzi do energii zadanej, druga do strat.
+        laptop_dc = np.where(maska_lap, LAPTOP_MOC_W, 0.0)
+        straty_dc = np.where(
+            maska_lap,
+            LAPTOP_MOC_W * (1.0 / LAPTOP_DC_SPRAWNOSC - 1.0), 0.0)
 
     # --- pobory własne podzespołów -------------------------------------
     # Nieprzerwanie przez cały czas trwania scenariusza, także wtedy, gdy
@@ -515,19 +530,34 @@ def zbuduj_profil(loc: Location, year: int, scenariusz: str,
         "ogrzewanie postojowe": webasto,
         "pobory własne": wlasne,
         "laptop (DC)": laptop_dc,
+        "straty przetwornicy laptopa": straty_dc,
         "laptop przez falownik (AC)": laptop_ac,
     }, index=idx)
     # Kolumna „laptop przez falownik" opisuje energię pobraną z szyny
     # stałoprądowej przez falownik, więc w bilansie wchodzi po stronie DC.
     # Rozdział szyn na potrzeby battery_balance: energia użyteczna odbiorników
     # AC podawana jest osobno.
-    ramka["energia użyteczna AC"] = np.where(maska_lap & (wariant_laptopa == "AC"),
-                                             LAPTOP_MOC_AC_W, 0.0)
+    # Energia zadana laptopa w wariancie AC: tyle samo, ile w wariancie DC,
+    # bo odnosi sie do zaciskow odbiornika, a nie do strony 230 V.
+    ramka["energia użyteczna AC"] = np.where(
+        maska_lap & (wariant_laptopa == "AC"), LAPTOP_MOC_W, 0.0)
+    # Kolumny "DC" i "AC" opisuja energie zadana na zaciskach odbiornikow,
+    # a kolumna "straty toru" - energie trat w zasilaczu, przetwornicy
+    # i falowniku, pobierana z szyny ponad energie zadana.
     ramka["DC"] = ramka[["chłodziarka", "Starlink", "oświetlenie LED i USB",
                          "ogrzewanie postojowe", "pobory własne",
                          "laptop (DC)"]].sum(axis=1)
     ramka["AC"] = ramka["energia użyteczna AC"]
+    ramka["straty toru"] = (
+        ramka["straty przetwornicy laptopa"]
+        + np.maximum(ramka["laptop przez falownik (AC)"]
+                     - ramka["energia użyteczna AC"], 0.0))
     ramka["pobór falownika z szyny DC"] = ramka["laptop przez falownik (AC)"]
+    # Godziny obowiazywania scenariusza: potrzebne do normowania srednich
+    # dobowych. Bez tego srednia dzieli energie przez daty kalendarzowe,
+    # a wyjazd trzydobowy wypada na czterech datach i srednia jest zanizona.
+    ramka["godziny użytkowania"] = uzytkowanie.astype(float)
+    ramka["godziny miesiąca czynnego"] = miesiac_czynny.astype(float)
     return ramka
 
 
@@ -567,7 +597,18 @@ def zestawienie(year: int | list[int], warianty: bool = True) -> pd.DataFrame:
                     if czynne.empty:
                         continue
                     for miesiac, grupa in czynne.groupby(czynne.index.month):
+                        # Doba to 24 godziny obowiazywania scenariusza, nie
+                        # data kalendarzowa: wyjazd trzydobowy rozklada sie na
+                        # cztery daty, a ogrzewanie pracuje przez polnoc.
+                        doby_uzytk = max(
+                            float(grupa["godziny użytkowania"].sum()) / 24.0,
+                            1e-9)
+                        doby_miesiaca = max(
+                            float(grupa["godziny miesiąca czynnego"].sum())
+                            / 24.0, 1e-9)
                         for kol in kolumny_odbiorow:
+                            doby = (doby_miesiaca if kol == "pobory własne"
+                                    else doby_uzytk)
                             wiersze.append({
                                 "lokalizacja": loc.label,
                                 "scenariusz": scen,
@@ -577,8 +618,9 @@ def zestawienie(year: int | list[int], warianty: bool = True) -> pd.DataFrame:
                                 "odbior": kol,
                                 "szyna": ("DC (za falownikiem)"
                                           if kol == "laptop przez falownik (AC)" else "DC"),
-                                "energia_dobowa_wh": round(float(grupa[kol].mean()), 1),
-                                "dni_czynnych": int(len(grupa)),
+                                "energia_dobowa_wh": round(
+                                    float(grupa[kol].sum()) / doby, 1),
+                                "dni_czynnych": int(round(doby)),
                             })
     tab = pd.DataFrame(wiersze)
     if len(lata) > 1:
